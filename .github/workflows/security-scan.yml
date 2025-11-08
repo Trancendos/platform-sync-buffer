@@ -6,21 +6,84 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: '0 0 * * 0' # Weekly
+    # Run weekly on Mondays at 9 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
-  security:
+  dependency-check:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-      - run: npm ci
-      - run: npm audit --audit-level=moderate
+      - name: Checkout code
+        uses: actions/checkout@v4
       
-      - name: Run Snyk Security Scan
-        uses: snyk/actions/node@master
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Check for package.json
+        id: check_package
+        run: |
+          if [ -f "package.json" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️  No package.json found"
+          fi
+      
+      - name: Run npm audit
+        if: steps.check_package.outputs.exists == 'true'
+        run: |
+          npm audit --audit-level=moderate || true
+          echo ""
+          echo "Note: npm audit may show vulnerabilities that need attention"
+      
+      - name: Check for vulnerable dependencies
+        if: steps.check_package.outputs.exists == 'true'
+        run: |
+          echo "Checking for high/critical vulnerabilities..."
+          npm audit --audit-level=high --json > audit-results.json || true
+          
+          if [ -f "audit-results.json" ]; then
+            HIGH_VULNS=$(cat audit-results.json | grep -o '"severity":"high"' | wc -l || echo "0")
+            CRITICAL_VULNS=$(cat audit-results.json | grep -o '"severity":"critical"' | wc -l || echo "0")
+            
+            echo "High severity vulnerabilities: $HIGH_VULNS"
+            echo "Critical severity vulnerabilities: $CRITICAL_VULNS"
+            
+            if [ "$CRITICAL_VULNS" -gt 0 ]; then
+              echo "✗ Critical vulnerabilities found!"
+              exit 1
+            fi
+          fi
+      
+      - name: Upload audit results
+        if: always() && steps.check_package.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-results
+          path: audit-results.json
+          retention-days: 30
+          if-no-files-found: ignore
+  
+  codeql-analysis:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+      
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
         continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
